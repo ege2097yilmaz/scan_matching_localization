@@ -40,6 +40,10 @@ cc::Vehicle::Control control;
 std::chrono::time_point<std::chrono::system_clock> currentTime;
 vector<ControlState> cs;
 
+// Define PointCloudT and PointT types
+typedef pcl::PointCloud<pcl::PointXYZ> PointCloudT;
+typedef pcl::PointXYZ PointT;
+
 bool refresh_view = false;
 void keyboardEventOccurred(const pcl::visualization::KeyboardEvent &event, void* viewer)
 {
@@ -100,65 +104,58 @@ void drawCar(Pose pose, int num, Color color, double alpha, pcl::visualization::
 }
 
 
-// Declare the function to use the ICP algorithm with some predefined parameters.
-// This algorithm matches the scan cloud with the corresponding cloud points in the map cloud and finds the corresponding transform matrix.
-Eigen::Matrix4d ICP(PointCloudT::Ptr target, PointCloudT::Ptr source, Pose startingPose) {
-    Eigen::Matrix4d transformation_matrix = Eigen::Matrix4d::Identity ();
+// Function to perform scan matching using NDT
+Eigen::Matrix4d NDT(PointCloudT::Ptr target, PointCloudT::Ptr source, Pose startingPose) {
+    Eigen::Matrix4d transformation_matrix = Eigen::Matrix4d::Identity();
     Eigen::Matrix4d initTransform = transform3D(startingPose.rotation.yaw, startingPose.rotation.pitch, startingPose.rotation.roll, startingPose.position.x, startingPose.position.y, startingPose.position.z);
-    PointCloudT::Ptr transformSource (new PointCloudT); 
-    pcl::transformPointCloud (*source, *transformSource, initTransform);
+    PointCloudT::Ptr transformSource(new PointCloudT);
+    pcl::transformPointCloud(*source, *transformSource, initTransform);
 
     pcl::console::TicToc time;
-    time.tic ();
-    pcl::IterativeClosestPoint<PointT, PointT> icp;
-    icp.setTransformationEpsilon(1e-8); //0.000001);
-    int iterations = 3; //50; //25; //4; //3;
-    icp.setMaximumIterations(iterations);
-    icp.setInputSource(transformSource);
-    icp.setInputTarget(target);
-    //icp.setMaxCorrespondenceDistance(20); //15); //8); //2);
-    //icp.setTransformationEpsilon(0.001);
-    //icp.setEuclideanFitnessEpsilon(0.00001); //.05);
-    //icp.setRANSACOutlierRejectionThreshold (10);
+    time.tic();
+    pcl::NormalDistributionsTransform<PointT, PointT> ndt;
+    ndt.setTransformationEpsilon(1e-8); 
+    int iterations = 35;
+    ndt.setMaximumIterations(iterations);
+    ndt.setResolution(1.0);
+    ndt.setStepSize(0.1);
+    ndt.setInputSource(transformSource);
+    ndt.setInputTarget(target);
 
-    PointCloudT::Ptr cloud_icp (new PointCloudT);  // ICP output point cloud
-    icp.align(*cloud_icp);
-    cout << "ICP has converged: " << icp.hasConverged () << " score: " << icp.getFitnessScore () <<  " time: " << time.toc() <<  " ms" << endl;
+    PointCloudT::Ptr cloud_ndt(new PointCloudT); // NDT output point cloud
+    ndt.align(*cloud_ndt);
+    std::cout << "NDT has converged: " << ndt.hasConverged() << " score: " << ndt.getFitnessScore() << " time: " << time.toc() << " ms" << std::endl;
 
-    if (icp.hasConverged ()) {
-      transformation_matrix = icp.getFinalTransformation ().cast<double>();
-      transformation_matrix =  transformation_matrix * initTransform;
-      return transformation_matrix;
-    } else cout << "WARNING: ICP did not converge" << endl;
+    if (ndt.hasConverged()) {
+        transformation_matrix = ndt.getFinalTransformation().cast<double>();
+        transformation_matrix = transformation_matrix * initTransform;
+        return transformation_matrix;
+    } else {
+        std::cout << "WARNING: NDT did not converge" << std::endl;
+    }
+
     return transformation_matrix;
 }
 
-// Declare the function to use the NDT algorithm with some predefined parameters.
-// This algorithm matches the scan cloud with the corresponding cloud points in the map cloud and finds the corresponding transform matrix.
-Eigen::Matrix4d NDT(PointCloudT::Ptr mapCloud, PointCloudT::Ptr source, Pose startingPose) {
-    pcl::NormalDistributionsTransform<pcl::PointXYZ, pcl::PointXYZ> ndt;
+Eigen::Matrix4d ICP(PointCloudT::Ptr mapCloud, PointCloudT::Ptr source, Pose startingPose) {
+    pcl::GeneralizedIterativeClosestPoint<pcl::PointXYZ, pcl::PointXYZ> gicp;
     // Setting minimum transformation difference for termination condition.
-    ndt.setTransformationEpsilon(1e-8); //1e-8); //1e-8); //0.000001);//.0001); 
-    // Setting maximum step size for More-Thuente line search.
-    //ndt.setStepSize(20); //15); //8); //5); //2); //1);
-    //Setting Resolution of NDT grid structure (VoxelGridCovariance).
-    ndt.setResolution(1); //1.5); //2); //0.5); //1);
-    //ndt.setEuclideanFitnessEpsilon(0.00001); //.05);
-    ndt.setInputTarget(mapCloud);
+    gicp.setTransformationEpsilon(1e-8); 
+    gicp.setInputTarget(mapCloud);
 
     pcl::console::TicToc time;
-    time.tic ();
+    time.tic();
     Eigen::Matrix4f init_guess = transform3D(startingPose.rotation.yaw, startingPose.rotation.pitch, startingPose.rotation.roll, startingPose.position.x, startingPose.position.y, startingPose.position.z).cast<float>();
 
     // Setting max number of registration iterations.
-    int iterations = 60; //60; //50; //25; //15; //10; //6; //3;
-    ndt.setMaximumIterations(iterations);
-    ndt.setInputSource(source);
+    int iterations = 60; 
+    gicp.setMaximumIterations(iterations);
+    gicp.setInputSource(source);
 
-    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_ndt (new pcl::PointCloud<pcl::PointXYZ>);
-    ndt.align (*cloud_ndt, init_guess);
-    cout << "NDT has converged: " << ndt.hasConverged () << " score: " << ndt.getFitnessScore () <<  " time: " << time.toc() <<  " ms" << endl;
-    Eigen::Matrix4d transformation_matrix = ndt.getFinalTransformation ().cast<double>();
+    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_gicp(new pcl::PointCloud<pcl::PointXYZ>);
+    gicp.align(*cloud_gicp, init_guess);
+    std::cout << "GICP has converged: " << gicp.hasConverged() << " score: " << gicp.getFitnessScore() << " time: " << time.toc() << " ms" << std::endl;
+    Eigen::Matrix4d transformation_matrix = gicp.getFinalTransformation().cast<double>();
     return transformation_matrix;
 }
 
